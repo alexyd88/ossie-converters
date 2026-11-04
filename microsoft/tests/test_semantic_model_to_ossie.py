@@ -17,6 +17,7 @@
 
 """Tests for the Power BI (TMSL ``model.bim``) -> Apache Ossie converter."""
 
+import copy
 import json
 import logging
 import warnings
@@ -464,6 +465,79 @@ def test_multi_line_measure_expression_is_joined(model):
 
 def test_multi_line_expressions_use_yaml_literal_blocks(bim):
     assert "COUNTROWS (\n" in convert_semantic_model_to_ossie(bim)
+
+
+@pytest.mark.parametrize("translate_dax", [False, True])
+@pytest.mark.parametrize(
+    "annotations",
+    [
+        [],
+        [
+            {"name": "OssieExpressionDialect", "value": "OSSIE_SQL_2026"},
+            {"name": "OssieExpression", "value": "SUM(Sales.Amount)"},
+        ],
+    ],
+)
+def test_native_sql_exports_current_expression_not_annotations(bim, translate_dax, annotations):
+    source = copy.deepcopy(bim)
+    sales = next(t for t in source["model"]["tables"] if t["name"] == "Sales")
+    measure = {
+        "name": "Native Revenue",
+        "expression": "SUM(Sales.Amount * 2) + 1",
+        "dialect": "sql",
+        "formatString": "0.00",
+        "annotations": annotations,
+    }
+    sales["measures"] = [measure]
+
+    document = build_ossie_document(source, translate_dax=translate_dax)
+    metric = _metric(document, "Native Revenue")
+    assert metric["expression"] == make_expression(measure["expression"], "ANSI_SQL")
+    stash = read_stash(metric)
+    assert stash["dialect"] == "sql"
+    assert stash["table"] == "Sales"
+    assert stash["formatString"] == "0.00"
+    assert stash.get("annotations", []) == annotations
+
+    restored = convert_ossie_to_semantic_model(document, use_sql_measures=True)
+    restored_sales = next(t for t in restored["model"]["tables"] if t["name"] == "Sales")
+    assert restored_sales["measures"][0]["expression"] == measure["expression"]
+    assert restored_sales["measures"][0]["dialect"] == "sql"
+
+
+def test_multiline_native_sql_exports_as_sql(bim):
+    source = copy.deepcopy(bim)
+    sales = next(t for t in source["model"]["tables"] if t["name"] == "Sales")
+    sales["measures"] = [
+        {"name": "Native Revenue", "expression": ["SUM(", "  Sales.Amount", ")"], "dialect": "sql"}
+    ]
+
+    document = yaml.safe_load(convert_semantic_model_to_ossie(source))
+    assert _metric(document, "Native Revenue")["expression"] == make_expression(
+        "SUM(\n  Sales.Amount\n)", "ANSI_SQL"
+    )
+
+
+@pytest.mark.parametrize("translate_dax", [False, True])
+def test_mixed_model_does_not_expand_sql_bodies_as_dax(bim, translate_dax):
+    source = copy.deepcopy(bim)
+    sales = next(t for t in source["model"]["tables"] if t["name"] == "Sales")
+    sales["measures"].extend(
+        [
+            {"name": "Native", "expression": "1 + 1", "dialect": "sql"},
+            {"name": "Caller", "expression": "[Native] + 1", "dialect": "dax"},
+        ]
+    )
+
+    document = build_ossie_document(source, translate_dax=translate_dax)
+    assert _metric(document, "Native")["expression"] == make_expression("1 + 1", "ANSI_SQL")
+    assert _metric(document, "Caller")["expression"] == make_expression("[Native] + 1", "DAX")
+    total = _metric(document, "Total Sales")
+    assert _expression(total, "DAX") == "SUM ( Sales[Amount] )"
+    if translate_dax:
+        assert _expression(total, "OSSIE_SQL_2026") == "SUM(Sales.Amount)"
+    else:
+        assert total["expression"] == make_expression("SUM ( Sales[Amount] )", "DAX")
 
 
 # --- relationships ---------------------------------------------------------

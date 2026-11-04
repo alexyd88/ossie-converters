@@ -149,9 +149,10 @@ def _as_tmsl(semantic_model):
 def build_ossie_document(bim_file, translate_dax=False):
     """Convert a parsed ``model.bim`` document into an Apache Ossie document (dict).
 
-    When ``translate_dax`` is true, measures are translated to ``OSSIE_SQL_2026``
-    where the translation is exact (see ``_dax_to_sql``); otherwise every
-    measure is kept as DAX, which is the default.
+    Native SQL measures retain their current expression as ``ANSI_SQL``.
+    When ``translate_dax`` is true, DAX measures are translated to ``OSSIE_SQL_2026``
+    where the translation is exact (see ``_dax_to_sql``); otherwise DAX measures
+    are kept as DAX, which is the default.
     """
     if not isinstance(bim_file, dict):
         raise TypeError("bim_file must be a parsed model.bim document (dict)")
@@ -558,11 +559,13 @@ def _measure_expression(dax_expression, scope, translate_dax, resolve_field, mea
 
 
 def _measure_bodies(tables):
-    """Map every measure name in ``tables`` to its DAX, for expanding measure references."""
+    """Map DAX measure names in ``tables`` to their bodies for expanding references."""
     bodies = {}
     for table in tables:
         for measure in table.get("measures") or []:
             if isinstance(measure, dict) and measure.get("name"):
+                if measure.get("dialect") == "sql":
+                    continue
                 expression = measure.get("expression")
                 bodies[measure["name"]] = text(expression) if expression is not None else ""
     return bodies
@@ -606,13 +609,17 @@ def _convert_metrics(tables, translate_dax=False, resolve_field=None):
 
             metric = {
                 "name": name,
-                "expression": _measure_expression(
-                    expression, scope, translate_dax, resolve_field, measures
+                "expression": (
+                    make_expression(expression, DIALECT_ANSI)
+                    if measure.get("dialect") == "sql"
+                    else _measure_expression(
+                        expression, scope, translate_dax, resolve_field, measures
+                    )
                 ),
             }
             if measure.get("description"):
                 metric["description"] = text(measure["description"])
-            # A measure's result type is inferred from its DAX, so it is reported for
+            # A measure's result type is inferred from its expression, so it is reported for
             # information only and always preserved verbatim in the stash rather than
             # being reconstructed from the portable type on the way back out.
             datatype = _map_datatype(
